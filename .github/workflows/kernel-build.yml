@@ -1,0 +1,91 @@
+name: starfive-riscv-kernel-build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 2 * * *"
+
+env:
+  ARCH: riscv
+  KBUILD_BUILD_USER: ruyisdk
+  KBUILD_BUILD_HOST: ruyisdk-builder
+  KDEB_COMPRESS: xz
+  KDEB_CHANGELOG_DIST: unstable
+  CROSS_COMPILE: riscv64-unknown-linux-gnu-
+  mainline_toolchain: https://github.com/riscv-collab/riscv-gnu-toolchain/releases/download/2023.10.18
+  mainline_toolchain_file_name: riscv64-glibc-ubuntu-22.04-gcc-nightly-2023.10.18-nightly.tar.gz
+  wget_alias: 'wget --retry-connrefused --waitretry=1 --read-timeout=20 --timeout=15 -t 0'
+
+jobs:
+  kernel:
+    strategy:
+      fail-fast: false
+      matrix:
+        board: [visionfive2]
+
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: "Update APT sources"
+        run: |
+          sudo apt update
+
+      - name: Free Disk Space (Ubuntu)
+        uses: jlumbroso/free-disk-space@main
+        with:
+          # this might remove tools that are actually needed,
+          # if set to "true" but frees about 6 GB
+          tool-cache: true
+          # all of these default to true, but feel free to set to
+          # "false" if necessary for your workflow
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Install software
+        run: |
+              sudo apt install -y gdisk dosfstools g++-12-riscv64-linux-gnu build-essential \
+                                  libncurses-dev gawk flex bison openssl libssl-dev tree \
+                                  dkms libelf-dev libudev-dev libpci-dev libiberty-dev autoconf device-tree-compiler \
+                                  devscripts libmpc-dev
+
+      - name: Checkout kernel
+        uses: actions/checkout@v4
+        with:
+            path: 'kernel'
+
+      - name: Compile Kernel && Install
+        run: |
+              ${wget_alias} ${mainline_toolchain}/${mainline_toolchain_file_name}
+              tar -xvf ${mainline_toolchain_file_name} -C /opt
+              export PATH="/opt/riscv/bin:$PATH"
+
+              mkdir -p rootfs
+              pushd kernel
+                make starfive_${{ matrix.board }}_defconfig
+                export KDEB_PKGVERSION="$(date "+%Y.%m.%d.%H.%M")+$(git rev-parse --short HEAD)"
+                sed -i '/CONFIG_LOCALVERSION_AUTO/d' .config && echo "CONFIG_LOCALVERSION_AUTO=n" >> .config
+                make -j$(nproc) bindeb-pkg LOCALVERSION="-${{ matrix.board }}"
+                # make -j$(nproc) dtbs
+
+                # Copy deb
+                sudo dcmd cp -v ../*.changes ${GITHUB_WORKSPACE}/rootfs/
+
+                # record commit-id
+                git rev-parse HEAD > ${{ matrix.board }}-kernel-commitid
+                sudo cp -v ${{ matrix.board }}-kernel-commitid ${GITHUB_WORKSPACE}/rootfs/
+
+                ls -al ${GITHUB_WORKSPACE}/rootfs/
+              popd
+
+      - name: 'Upload Artifact'
+        uses: actions/upload-artifact@v3
+        with:
+          name: starfive-riscv-kernel-${{ matrix.board }}
+          path: rootfs/*
+          retention-days: 60
